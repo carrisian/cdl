@@ -1,0 +1,1867 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head><script>window.__nativeFetch=window.fetch.bind(window)</script><script>window.__AIKIT_ARTIFACT_LINK_ID__="6ab3baaf18cfd2854d2ec499"</script><script>window.__AIKIT_ARTIFACT_ID__="6aa65642a603189a04ef9082"</script><script src="/inference-client.js"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Laboratorio guiado: Normalización de bases de datos (1FN · 2FN · 3FN) — DAM</title>
+    <!-- Tailwind v4 via CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.7"></script>
+    <!-- Babel standalone -->
+    <script src="https://unpkg.com/@babel/standalone@7.26.10/babel.min.js"></script>
+    <!-- Importmap ESM -->
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.3.1",
+            "react/": "https://esm.sh/react@18.3.1/",
+            "react-dom": "https://esm.sh/react-dom@18.3.1",
+            "react-dom/": "https://esm.sh/react-dom@18.3.1/",
+            "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.474.0?external=react"
+        }
+    }
+    </script>
+<script>
+(function(){
+  var ARTIFACT_LINK_ID="6ab3baaf18cfd2854d2ec499";
+  var PROXY_BASE='/api/published/'+ARTIFACT_LINK_ID+'/proxy';
+
+  /**
+   * One reading of a refusal for every call this bridge makes.
+   *
+   * Both wire envelopes are accepted because both reach these routes — the
+   * proxy answers 'errors[]' on the tool routes and the OpenAI 'error' shape
+   * on chat/completions — and the message inside is the only thing a
+   * visitor can act on: 'failed: 402' tells them nothing about a wallet that
+   * ran out. The status line is the last resort, never the first.
+   *
+   * Always called on a body read as res.json().catch(-> null): an error body
+   * is not always JSON (a proxy's 502 page, an empty 429), and letting that
+   * parse reject would replace the failure it was meant to describe.
+   */
+  function refusalError(res,data,fallback){
+    var msg=(data&&data.error&&data.error.message)||(data&&data.errors&&data.errors[0]&&data.errors[0].message)||(fallback+res.status);
+    return new Error(msg);
+  }
+
+  function InferenceResponse(data){
+    this.ok=data.status>=200&&data.status<300;
+    this.status=data.status;
+    this.statusText=data.statusText||'';
+    this.headers=data.headers||{};
+    this._body=data.body||'';
+    this._encoding=data.encoding||'utf-8';
+  }
+  InferenceResponse.prototype.text=function(){
+    return Promise.resolve(this._body);
+  };
+  InferenceResponse.prototype.json=function(){
+    return Promise.resolve(JSON.parse(this._body));
+  };
+  InferenceResponse.prototype.blob=function(){
+    if(this._encoding==='base64'){
+      var bin=atob(this._body);
+      var arr=new Uint8Array(bin.length);
+      for(var i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
+      var ct=this.headers['content-type']||'application/octet-stream';
+      return Promise.resolve(new Blob([arr],{type:ct}));
+    }
+    return Promise.resolve(new Blob([this._body],{type:this.headers['content-type']||'text/plain'}));
+  };
+
+  // Published context flag — SDK uses this to detect runtime tier
+  window.__AIKIT_PUBLISHED__=true;
+  window.__AIKIT_PROXY_BASE__=PROXY_BASE;
+
+  window.AiKit=window.AiKit||{};
+
+  /**
+   * AiKit.fetch for published artifacts.
+   *
+   * Routes calls through the published proxy which enforces grants,
+   * budgets, and consumption tracking server-side.
+   *
+   * - CMS tool calls (/api/inference/tools/execute) → published proxy
+   * - External URL calls → published proxy artifact-fetch relay
+   * - No auth credentials needed — proxy injects the API key server-side
+   */
+  window.AiKit.fetch=function(url,opts){
+    opts=opts||{};
+
+    // Detect CMS tool-execute calls and route to published proxy
+    if(url==='/api/inference/tools/execute'||url.indexOf('/api/inference/tools/execute')===0){
+      return (window.__nativeFetch||fetch)(PROXY_BASE+'/tools/execute',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:opts.body||undefined
+      }).then(function(res){
+        if(!res.ok){
+          return res.json().catch(function(){return null;}).then(function(data){
+            throw refusalError(res,data,'AiKit.fetch failed: ');
+          });
+        }
+        return res.json().then(function(data){
+          return {ok:true,status:res.status,json:function(){return Promise.resolve(data);},text:function(){return Promise.resolve(JSON.stringify(data));}};
+        });
+      });
+    }
+
+    // All other calls → published proxy artifact-fetch relay (no auth, no secrets)
+    return (window.__nativeFetch||fetch)(PROXY_BASE+'/artifact-fetch',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        url:url,
+        method:(opts.method||'GET').toUpperCase(),
+        headers:opts.headers||{},
+        body:opts.body||undefined
+      })
+    }).then(function(res){
+      if(!res.ok){
+        return res.json().catch(function(){return null;}).then(function(data){
+          throw refusalError(res,data,'AiKit.fetch failed: ');
+        });
+      }
+      return res.json().then(function(data){
+        return new InferenceResponse(data);
+      });
+    });
+  };
+  window.inference={fetch:function(url,opts){console.warn('[AiKit] window.inference.fetch() is deprecated. Use window.AiKit.fetch() instead.');return window.AiKit.fetch(url,opts);}};
+
+  /**
+   * Override AiKit.createClient() for published artifacts.
+   *
+   * The inference SDK (inference-client.js) loads first and defines createClient().
+   * We override it here to route all calls through the published proxy:
+   * - tools.execute() → PROXY_BASE/tools/execute
+   * - chat.completions.create() → PROXY_BASE/chat/completions (OpenAI-compatible)
+   *
+   * No auth required — the proxy injects the API key server-side.
+   * Auth checks are skipped (no cookie, no banner).
+   */
+  var _origCreateClient=window.AiKit.createClient;
+  window.AiKit.createClient=function(opts){
+    var CHAT_URL=PROXY_BASE+'/chat/completions';
+    var TOOLS_URL=PROXY_BASE+'/tools/execute';
+
+    // Published tools.execute — direct POST to proxy.
+    // Slow tools (gpt-image-2 etc.) return 202 { jobId } so AFD doesn't 504.
+    // The polling loop below is transparent to the caller's await.
+    function pollSlowToolJob(jobId){
+      var delays=[2000,4000,6000,8000,10000];
+      var attempt=0;
+      var startedAt=Date.now();
+      // 15 min — gpt-image-2 outliers have been seen up to ~7 min (414s).
+      // Earlier 6 min cap rejected just before completion.
+      var MAX_WAIT_MS=15*60*1000;
+      var URL=PROXY_BASE+'/tools/jobs/'+jobId;
+      return new Promise(function(resolve,reject){
+        var settled=false;
+        function done(fn,val){if(settled)return;settled=true;fn(val);}
+        function schedule(){
+          if(settled)return;
+          var delay=delays[Math.min(attempt,delays.length-1)];
+          attempt++;
+          setTimeout(tick,delay);
+        }
+        function tick(){
+          if(settled)return;
+          if(Date.now()-startedAt>MAX_WAIT_MS){
+            done(reject,new Error('Tool execution timed out after 15 minutes'));
+            return;
+          }
+          (window.__nativeFetch||fetch)(URL).then(function(res){
+            if(res.status===404){done(reject,new Error('Tool job lost or expired'));return;}
+            if(res.status===403){done(reject,new Error('Tool job access denied'));return;}
+            if(res.status>=500){schedule();return;}// transient, keep cadence
+            return res.json().then(function(data){
+              if(data.status==='completed'){done(resolve,data.result);return;}
+              if(data.status==='failed'){
+                var err=data.error||{};
+                done(reject,new Error('Tool execution failed: '+(err.code||'UNKNOWN')+' - '+(err.message||'')));
+                return;
+              }
+              schedule();// pending
+            });
+          }).catch(function(err){done(reject,err);});
+        }
+        setTimeout(tick,delays[0]);
+      });
+    }
+    var tools={
+      execute:function(toolId,params){
+        return (window.__nativeFetch||fetch)(TOOLS_URL,{
+          method:'POST',
+          // X-AiKit-SDK-Version: backend uses this to gate async slow-tool
+          // bifurcation. v2 = "I know how to poll jobIds on 202". Older
+          // artifacts (published before the polling SDK shipped) don't send
+          // this header and stay on the sync path.
+          headers:{'Content-Type':'application/json','X-AiKit-SDK-Version':'2'},
+          body:JSON.stringify({name:toolId,args:params||{}})
+        }).then(function(res){
+          // Refusals first — see refusalError for why the parse is guarded.
+          if(!res.ok){
+            return res.json().catch(function(){return null;}).then(function(data){
+              throw refusalError(res,data,'Tool execution failed: ');
+            });
+          }
+          return res.json().then(function(data){
+            // 202 → async slow tool. Poll the job until done.
+            if(res.status===202&&data&&data.jobId){
+              return pollSlowToolJob(data.jobId);
+            }
+            return data;
+          });
+        });
+      }
+    };
+
+    // Published chat.completions — proxied through OpenAI-compatible endpoint
+    var chatCompletions={
+      create:function(params){
+        var isStream=params&&params.stream;
+        if(isStream){
+          // Streaming: return async iterator over SSE
+          return (window.__nativeFetch||fetch)(CHAT_URL,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(params)
+          }).then(function(res){
+            // Read the refusal BEFORE opening the reader: a 402 (wallet), a
+            // 429 or a 503 all carry their message in the body, and a reader
+            // opened on it would stream nothing and say nothing.
+            if(!res.ok){
+              return res.json().catch(function(){return null;}).then(function(data){
+                throw refusalError(res,data,'Chat completion failed: ');
+              });
+            }
+            var reader=res.body.getReader();
+            var decoder=new TextDecoder();
+            var buffer='';
+            return {
+              [Symbol.asyncIterator]:function(){
+                return {
+                  next:function(){
+                    return reader.read().then(function processChunk(result){
+                      if(result.done)return{done:true,value:undefined};
+                      buffer+=decoder.decode(result.value,{stream:true});
+                      var lines=buffer.split('\n');
+                      buffer=lines.pop()||'';
+                      for(var i=0;i<lines.length;i++){
+                        var line=lines[i].trim();
+                        if(line.startsWith('data: ')&&line!=='data: [DONE]'){
+                          try{
+                            var chunk=JSON.parse(line.slice(6));
+                            return{done:false,value:chunk};
+                          }catch(_){}
+                        }
+                      }
+                      return reader.read().then(processChunk);
+                    });
+                  }
+                };
+              }
+            };
+          });
+        }
+        // Non-streaming: simple JSON response
+        return (window.__nativeFetch||fetch)(CHAT_URL,{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(params)
+        }).then(function(res){
+          // Same shape as the streaming branch above, deliberately: one route,
+          // one way of reporting a refusal.
+          if(!res.ok){
+            return res.json().catch(function(){return null;}).then(function(data){
+              throw refusalError(res,data,'Chat completion failed: ');
+            });
+          }
+          return res.json();
+        });
+      }
+    };
+
+    // Published streamTo helper
+    var streamTo=function(target,params){
+      var el=typeof target==='string'?document.querySelector(target):target;
+      if(!el)throw new Error('Element not found: '+target);
+      return chatCompletions.create(Object.assign({},params,{stream:true})).then(function(stream){
+        var iter=stream[Symbol.asyncIterator]();
+        function pump(){
+          return iter.next().then(function(r){
+            if(r.done)return;
+            var delta=r.value&&r.value.choices&&r.value.choices[0]&&r.value.choices[0].delta&&r.value.choices[0].delta.content;
+            if(delta)el.textContent=(el.textContent||'')+delta;
+            return pump();
+          });
+        }
+        return pump();
+      });
+    };
+
+    return {
+      chat:{completions:chatCompletions},
+      tools:tools,
+      streamTo:streamTo
+    };
+  };
+})();
+</script><script>
+(function(){
+  var PROXY_BASE='/api/published/'+"6ab3baaf18cfd2854d2ec499"+'/proxy';
+
+  function callPlugin(name,args){
+    return (window.__nativeFetch||fetch)(PROXY_BASE+'/tools/execute',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:name,args:args})
+    }).then(function(res){
+      return res.json().then(function(data){
+        if(!res.ok){
+          var msg=(data.errors&&data.errors[0]&&data.errors[0].message)||'DB operation failed';
+          throw new Error(msg);
+        }
+        return data.result||data;
+      });
+    });
+  }
+
+  function DbHandle(nameOrId,opts){
+    this._nameOrId=nameOrId;
+    this._opts=opts||{};
+    this._dbId=null;
+    this._permission='read';
+    this._hasPending=false;
+    this._pendingCount=0;
+    this._pendingListeners=[];
+    this._opened=false;
+    this._liveInterval=null;
+    this._lastVersion=null;
+  }
+
+  DbHandle.prototype._ensureOpen=function(){
+    if(this._opened)return Promise.resolve();
+    var self=this;
+    // Resolve DB by name or ID — response is {success,result:{databases:[...]}}
+    return callPlugin('dbList',{}).then(function(data){
+      var r=data&&data.result?data.result:data;
+      var dbs=r&&r.databases?r.databases:[];
+      var match=dbs.find(function(db){
+        return db.id===self._nameOrId||db.name===self._nameOrId;
+      });
+      if(!match)throw new Error('Database "'+self._nameOrId+'" not found');
+      self._dbId=match.id;
+      self._permission=match.permission||'read';
+      self._opened=true;
+      if(self._opts.live)self._startLive();
+    });
+  };
+
+  DbHandle.prototype._startLive=function(){
+    if(this._liveInterval)return;
+    var self=this;
+    this._liveInterval=setInterval(function(){
+      if(!self._dbId)return;
+      callPlugin('dbVersion',{dbId:self._dbId}).then(function(data){
+        var r=data&&data.result?data.result:data;
+        var v=r&&r.version;
+        if(v!==undefined&&self._lastVersion!==null&&v!==self._lastVersion){
+          self._pendingListeners.forEach(function(fn){try{fn(false);}catch(_){}});
+        }
+        self._lastVersion=v;
+      }).catch(function(){});
+    },5000);
+  };
+
+  DbHandle.prototype.query=function(sql,params){
+    var self=this;
+    return this._ensureOpen().then(function(){
+      return callPlugin('dbQuery',{dbId:self._dbId,sql:sql,params:params||[]}).then(function(data){return data&&data.result?data.result:data});
+    });
+  };
+
+  DbHandle.prototype.exec=function(sql,params){
+    var self=this;
+    return this._ensureOpen().then(function(){
+      return callPlugin('dbExec',{dbId:self._dbId,sql:sql,params:params||[]}).then(function(data){return data&&data.result?data.result:data});
+    });
+  };
+
+  DbHandle.prototype.insert=function(table,row){
+    var self=this;
+    return this._ensureOpen().then(function(){
+      return callPlugin('dbInsert',{dbId:self._dbId,table:table,row:row}).then(function(data){return data&&data.result?data.result:data});
+    });
+  };
+
+  DbHandle.prototype.bulkInsert=function(table,rows){
+    var self=this;
+    return this._ensureOpen().then(function(){
+      return callPlugin('dbBulkInsert',{dbId:self._dbId,table:table,rows:rows}).then(function(data){return data&&data.result?data.result:data});
+    });
+  };
+
+  DbHandle.prototype.refresh=function(){
+    var self=this;
+    return this._ensureOpen().then(function(){
+      return callPlugin('dbVersion',{dbId:self._dbId}).then(function(data){return data&&data.result?data.result:data});
+    });
+  };
+
+  DbHandle.prototype.stopLive=function(){
+    if(this._liveInterval){
+      clearInterval(this._liveInterval);
+      this._liveInterval=null;
+    }
+  };
+
+  DbHandle.prototype.onPendingChange=function(fn){
+    this._pendingListeners.push(fn);
+    var self=this;
+    return function(){
+      var idx=self._pendingListeners.indexOf(fn);
+      if(idx>=0)self._pendingListeners.splice(idx,1);
+    };
+  };
+
+  Object.defineProperty(DbHandle.prototype,'hasPending',{get:function(){return this._hasPending;}});
+  Object.defineProperty(DbHandle.prototype,'pendingCount',{get:function(){return this._pendingCount;}});
+  Object.defineProperty(DbHandle.prototype,'permission',{get:function(){return this._permission;}});
+
+  window.AiKit=window.AiKit||{};
+  window.AiKit.db=function(nameOrId,opts){return new DbHandle(nameOrId,opts);};
+})();
+</script></head>
+<body class="bg-slate-50 text-slate-900 min-h-screen font-sans antialiased selection:bg-indigo-500 selection:text-white">
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module" data-presets="react">
+        import React, { useState, useEffect } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+            Database, 
+            CheckCircle2, 
+            XCircle, 
+            ArrowLeft, 
+            ArrowRight, 
+            BookOpen, 
+            ShieldCheck, 
+            Check, 
+            ExternalLink, 
+            FileText, 
+            Sparkles, 
+            RotateCcw,
+            HelpCircle,
+            Layers,
+            AlertCircle,
+            CheckSquare
+        } from 'lucide-react';
+
+        function App() {
+            const [currentStep, setCurrentStep] = useState(1);
+            const totalSteps = 6;
+
+            // Scroll top when step changes
+            useEffect(() => {
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }, [currentStep]);
+
+            // Step 2 State
+            const [detectedProblems, setDetectedProblems] = useState({
+                redundancy: false,
+                multiValue: false,
+                expansionDifficulty: false
+            });
+
+            // Step 3 State
+            const [studentNotes1FN, setStudentNotes1FN] = useState('');
+            const [showSolution1FN, setShowSolution1FN] = useState(false);
+
+            // Step 4 State
+            const [selected2FNOption, setSelected2FNOption] = useState(null);
+            const [submitted2FN, setSubmitted2FN] = useState(false);
+
+            // Step 6 State (Quiz)
+            const [quizAnswers, setQuizAnswers] = useState({
+                q1: '',
+                q2: '',
+                q3: '',
+                q4: '',
+                q5: ''
+            });
+            const [quizSubmitted, setQuizSubmitted] = useState(false);
+            const [quizScore, setQuizScore] = useState(0);
+
+            // Handlers
+            const handleStep2Checkbox = (key) => {
+                setDetectedProblems(prev => ({ ...prev, [key]: !prev[key] }));
+            };
+
+            const allProblemsChecked = detectedProblems.redundancy && detectedProblems.multiValue && detectedProblems.expansionDifficulty;
+
+            const handleQuizOptionChange = (question, option) => {
+                if (quizSubmitted) return;
+                setQuizAnswers(prev => ({ ...prev, [question]: option }));
+            };
+
+            const handleQuizSubmit = (e) => {
+                e.preventDefault();
+                let score = 0;
+                if (quizAnswers.q1 === 'b') score++;
+                if (quizAnswers.q2 === 'c') score++;
+                if (quizAnswers.q3 === 'a') score++;
+                if (quizAnswers.q4 === 'c') score++;
+                if (quizAnswers.q5 === 'b') score++;
+                setQuizScore(score);
+                setQuizSubmitted(true);
+            };
+
+            const resetQuiz = () => {
+                setQuizAnswers({ q1: '', q2: '', q3: '', q4: '', q5: '' });
+                setQuizSubmitted(false);
+                setQuizScore(0);
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col bg-slate-50 text-slate-800">
+                    {/* Header superior fijo con progreso y metadata */}
+                    <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-xs">
+                        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3.5">
+                            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                                <div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="p-1.5 bg-indigo-100 text-indigo-700 rounded-lg flex items-center justify-center">
+                                            <Database className="w-5 h-5" aria-hidden="true" />
+                                        </span>
+                                        <h1 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight">
+                                            Laboratorio guiado: Normalización de bases de datos (1FN · 2FN · 3FN)
+                                        </h1>
+                                    </div>
+                                    <p className="text-xs sm:text-sm text-slate-600 font-medium mt-0.5 ml-8 sm:ml-9">
+                                        DAM · 2º curso · Duración estimada: 45 minutos
+                                    </p>
+                                </div>
+                                <div className="flex items-center justify-between md:justify-end gap-3 self-end md:self-auto w-full md:w-auto">
+                                    <a 
+                                        href="https://creativecommons.org/licenses/by/4.0/deed.es" 
+                                        target="_blank" 
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        title="Ver términos de la licencia Creative Commons Reconocimiento 4.0 Internacional"
+                                    >
+                                        <span>Licencia: CC BY 4.0 — Reconocimiento</span>
+                                        <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+                                    </a>
+                                </div>
+                            </div>
+
+                            {/* Stepper / Barra de Progreso Accesible */}
+                            <div className="mt-4 pt-3 border-t border-slate-100">
+                                <div className="flex items-center justify-between mb-1.5 text-xs font-semibold text-slate-700">
+                                    <span>Paso {currentStep} de {totalSteps}</span>
+                                    <span className="text-indigo-700 font-bold">
+                                        {currentStep === 1 && "1. Introducción y Conceptos"}
+                                        {currentStep === 2 && "2. Diagnóstico del Caso Inicial"}
+                                        {currentStep === 3 && "3. Aplicación de 1FN"}
+                                        {currentStep === 4 && "4. Aplicación de 2FN"}
+                                        {currentStep === 5 && "5. Aplicación de 3FN"}
+                                        {currentStep === 6 && "6. Autoevaluación Final"}
+                                    </span>
+                                </div>
+                                <div 
+                                    className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden" 
+                                    role="progressbar" 
+                                    aria-valuenow={currentStep} 
+                                    aria-valuemin={1} 
+                                    aria-valuemax={totalSteps}
+                                    aria-label="Progreso del laboratorio guiado"
+                                >
+                                    <div 
+                                        className="bg-indigo-600 h-2.5 rounded-full transition-all duration-300 ease-out" 
+                                        style={{ width: `${(currentStep / totalSteps) * 100}%` }}
+                                    ></div>
+                                </div>
+
+                                {/* Step tabs for quick navigation */}
+                                <nav aria-label="Pasos del laboratorio" className="flex justify-between items-center mt-2.5 gap-1 overflow-x-auto py-1">
+                                    {[
+                                        { id: 1, label: 'Intro' },
+                                        { id: 2, label: 'Caso base' },
+                                        { id: 3, label: '1FN' },
+                                        { id: 4, label: '2FN' },
+                                        { id: 5, label: '3FN' },
+                                        { id: 6, label: 'Test' }
+                                    ].map((step) => {
+                                        const isActive = currentStep === step.id;
+                                        const isCompleted = currentStep > step.id;
+                                        return (
+                                            <button
+                                                key={step.id}
+                                                type="button"
+                                                onClick={() => setCurrentStep(step.id)}
+                                                aria-current={isActive ? 'step' : undefined}
+                                                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-md transition-all whitespace-nowrap focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2 ${
+                                                    isActive 
+                                                        ? 'bg-indigo-600 text-white shadow-xs' 
+                                                        : isCompleted
+                                                            ? 'bg-indigo-50 text-indigo-800 hover:bg-indigo-100'
+                                                            : 'text-slate-600 hover:bg-slate-100'
+                                                }`}
+                                            >
+                                                <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                                                    isActive ? 'bg-white text-indigo-700' : isCompleted ? 'bg-indigo-600 text-white' : 'bg-slate-300 text-slate-700'
+                                                }`}>
+                                                    {isCompleted ? '✓' : step.id}
+                                                </span>
+                                                <span className="hidden sm:inline">{step.label}</span>
+                                            </button>
+                                        );
+                                    })}
+                                </nav>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* Contenido Principal */}
+                    <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-8">
+                        {/* Tarjeta del paso activo */}
+                        <div className="bg-white border border-slate-200 rounded-xl shadow-xs p-6 sm:p-8">
+                            
+                            {/* PASO 1: INTRODUCCIÓN */}
+                            {currentStep === 1 && (
+                                <section aria-labelledby="step1-heading" className="space-y-6">
+                                    <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                                        <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-lg">
+                                            <BookOpen className="w-6 h-6" aria-hidden="true" />
+                                        </div>
+                                        <div>
+                                            <h2 id="step1-heading" className="text-xl sm:text-2xl font-bold text-slate-900">
+                                                Paso 1: Fundamentos y Objetivos de la Normalización
+                                            </h2>
+                                            <p className="text-sm text-slate-600">Fundamentación técnica para el alumnado de Desarrollo de Aplicaciones Multiplataforma</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-indigo-50/70 border-l-4 border-indigo-600 p-5 rounded-r-lg space-y-2">
+                                        <h3 className="font-semibold text-indigo-950 text-base flex items-center gap-2">
+                                            <Sparkles className="w-4 h-4 text-indigo-600" aria-hidden="true" />
+                                            ¿Qué es la normalización de bases de datos?
+                                        </h3>
+                                        <p className="text-slate-800 text-sm leading-relaxed">
+                                            La <strong>normalización</strong> es el proceso sistemático de organizar la estructura de una base de datos relacional descomponiendo tablas complejas en entidades más pequeñas y bien acotadas, conectadas mediante claves primarias y foráneas. Su finalidad es <strong>eliminar redundancias perjudiciales</strong>, <strong>prevenir anomalías de inserción, actualización y borrado</strong>, y <strong>garantizar la integridad referencial</strong> de los datos en aplicaciones de producción.
+                                        </p>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div className="border border-slate-200 rounded-lg p-5 bg-white space-y-3">
+                                            <h3 className="font-semibold text-slate-900 text-base flex items-center gap-2 text-indigo-700">
+                                                <Layers className="w-5 h-5" aria-hidden="true" />
+                                                Objetivo pedagógico de la sesión
+                                            </h3>
+                                            <ul className="space-y-2 text-sm text-slate-700 list-disc list-inside">
+                                                <li>Analizar una estructura plana y desnormalizada con anomalías reales.</li>
+                                                <li>Aplicar de forma justificada la <strong>1ª Forma Normal (1FN)</strong> eliminando grupos repetitivos.</li>
+                                                <li>Aplicar la <strong>2ª Forma Normal (2FN)</strong> suprimiendo dependencias funcionales parciales.</li>
+                                                <li>Aplicar la <strong>3ª Forma Normal (3FN)</strong> eliminando dependencias transitivas.</li>
+                                            </ul>
+                                        </div>
+
+                                        <div className="border border-slate-200 rounded-lg p-5 bg-white space-y-3">
+                                            <h3 className="font-semibold text-slate-900 text-base flex items-center gap-2 text-emerald-700">
+                                                <CheckCircle2 className="w-5 h-5" aria-hidden="true" />
+                                                Entregable final del laboratorio
+                                            </h3>
+                                            <p className="text-sm text-slate-700 leading-relaxed">
+                                                Al culminar el recorrido obtendrás el <strong>esquema relacional óptimo en 3FN</strong> compuesto por 3 tablas semánticamente consistentes, junto con la justificación técnica de cada paso y un test de autoevaluación corregido.
+                                            </p>
+                                            <div className="p-3 bg-slate-50 rounded border border-slate-200 text-xs text-slate-600 font-mono">
+                                                Esquema objetivo: Clientes ➔ Pedidos ➔ Detalle_Pedido
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="pt-4 flex justify-end">
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentStep(2)}
+                                            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        >
+                                            <span>Comenzar con el Caso Práctico</span>
+                                            <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                                        </button>
+                                    </div>
+                                </section>
+                            )}
+
+                            {/* PASO 2: CASO DE PARTIDA */}
+                            {currentStep === 2 && (
+                                <section aria-labelledby="step2-heading" className="space-y-6">
+                                    <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                                        <div className="p-2.5 bg-amber-50 text-amber-600 rounded-lg">
+                                            <AlertCircle className="w-6 h-6" aria-hidden="true" />
+                                        </div>
+                                        <div>
+                                            <h2 id="step2-heading" className="text-xl sm:text-2xl font-bold text-slate-900">
+                                                Paso 2: Caso de partida — Tabla desnormalizada "Pedidos"
+                                            </h2>
+                                            <p className="text-sm text-slate-600">Observa la siguiente tabla plana generada para un sistema de facturación sin normalizar.</p>
+                                        </div>
+                                    </div>
+
+                                    {/* Tabla HTML semántica de partida */}
+                                    <div className="space-y-2">
+                                        <h3 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">
+                                            Tabla fuente: <span className="font-mono text-indigo-700 font-bold">Pedidos_Original</span>
+                                        </h3>
+                                        <div className="overflow-x-auto border border-slate-300 rounded-lg shadow-2xs">
+                                            <table className="w-full text-left text-xs sm:text-sm border-collapse bg-white">
+                                                <caption className="sr-only">Tabla no normalizada de pedidos con columnas repetidas y datos redundantes</caption>
+                                                <thead className="bg-slate-100 text-slate-800 font-semibold border-b border-slate-300">
+                                                    <tr>
+                                                        <th scope="col" className="p-3 border-r border-slate-200">Nº Pedido</th>
+                                                        <th scope="col" className="p-3 border-r border-slate-200">Cliente</th>
+                                                        <th scope="col" className="p-3 border-r border-slate-200">Email Cliente</th>
+                                                        <th scope="col" className="p-3 border-r border-slate-200">Producto 1</th>
+                                                        <th scope="col" className="p-3 border-r border-slate-200">Producto 2</th>
+                                                        <th scope="col" className="p-3 border-r border-slate-200">Producto 3</th>
+                                                        <th scope="col" className="p-3 border-r border-slate-200">Precio Unit.</th>
+                                                        <th scope="col" className="p-3 border-r border-slate-200">Cantidad</th>
+                                                        <th scope="col" className="p-3">Nombre Comercial</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-200 text-slate-700">
+                                                    <tr className="hover:bg-slate-50 transition-colors">
+                                                        <th scope="row" className="p-3 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-01</th>
+                                                        <td className="p-3 border-r border-slate-200 font-medium">Marta Soler</td>
+                                                        <td className="p-3 border-r border-slate-200 text-slate-600">msoler@dam-fp.es</td>
+                                                        <td className="p-3 border-r border-slate-200">Teclado mecánico RGB</td>
+                                                        <td className="p-3 border-r border-slate-200">Ratón óptico 3200DPI</td>
+                                                        <td className="p-3 border-r border-slate-200 text-slate-400 italic">NULL</td>
+                                                        <td className="p-3 border-r border-slate-200">75.00 €</td>
+                                                        <td className="p-3 border-r border-slate-200">1</td>
+                                                        <td className="p-3 font-medium text-slate-900 bg-amber-50/50">TecnoDAM Suministros SL</td>
+                                                    </tr>
+                                                    <tr className="hover:bg-slate-50 transition-colors">
+                                                        <th scope="row" className="p-3 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-02</th>
+                                                        <td className="p-3 border-r border-slate-200 font-medium">Carlos Benítez</td>
+                                                        <td className="p-3 border-r border-slate-200 text-slate-600">cbenitez@redes-fp.es</td>
+                                                        <td className="p-3 border-r border-slate-200">Monitor IPS 27"</td>
+                                                        <td className="p-3 border-r border-slate-200 text-slate-400 italic">NULL</td>
+                                                        <td className="p-3 border-r border-slate-200 text-slate-400 italic">NULL</td>
+                                                        <td className="p-3 border-r border-slate-200">199.99 €</td>
+                                                        <td className="p-3 border-r border-slate-200">2</td>
+                                                        <td className="p-3 font-medium text-slate-900 bg-amber-50/50">TecnoDAM Suministros SL</td>
+                                                    </tr>
+                                                    <tr className="hover:bg-slate-50 transition-colors">
+                                                        <th scope="row" className="p-3 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-03</th>
+                                                        <td className="p-3 border-r border-slate-200 font-medium">Marta Soler</td>
+                                                        <td className="p-3 border-r border-slate-200 text-slate-600">msoler@dam-fp.es</td>
+                                                        <td className="p-3 border-r border-slate-200">Auriculares Studio Pro</td>
+                                                        <td className="p-3 border-r border-slate-200">Webcam 1080p FHD</td>
+                                                        <td className="p-3 border-r border-slate-200">Soporte Monitor Brazo</td>
+                                                        <td className="p-3 border-r border-slate-200">89.50 €</td>
+                                                        <td className="p-3 border-r border-slate-200">1</td>
+                                                        <td className="p-3 font-medium text-slate-900 bg-amber-50/50">TecnoDAM Suministros SL</td>
+                                                    </tr>
+                                                    <tr className="hover:bg-slate-50 transition-colors">
+                                                        <th scope="row" className="p-3 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-04</th>
+                                                        <td className="p-3 border-r border-slate-200 font-medium">Daniel Ramos</td>
+                                                        <td className="p-3 border-r border-slate-200 text-slate-600">dramos@tech-fp.com</td>
+                                                        <td className="p-3 border-r border-slate-200">Memoria RAM 32GB DDR5</td>
+                                                        <td className="p-3 border-r border-slate-200 text-slate-400 italic">NULL</td>
+                                                        <td className="p-3 border-r border-slate-200 text-slate-400 italic">NULL</td>
+                                                        <td className="p-3 border-r border-slate-200">115.00 €</td>
+                                                        <td className="p-3 border-r border-slate-200">4</td>
+                                                        <td className="p-3 font-medium text-slate-900 bg-amber-50/50">TecnoDAM Suministros SL</td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+
+                                    {/* Diagnóstico interactivo con checkboxes */}
+                                    <div className="border border-slate-200 bg-slate-50/80 rounded-xl p-5 space-y-4">
+                                        <div className="flex items-center gap-2">
+                                            <HelpCircle className="w-5 h-5 text-indigo-600" aria-hidden="true" />
+                                            <h3 className="font-bold text-slate-900 text-base">
+                                                Actividad de diagnóstico: ¿Qué problemas estructurales identificas?
+                                            </h3>
+                                        </div>
+                                        <p className="text-sm text-slate-600">
+                                            Marca las casillas que representen fallos de diseño evidentes en la tabla anterior:
+                                        </p>
+
+                                        <div className="space-y-3">
+                                            <div className="flex items-start gap-3 bg-white p-3.5 rounded-lg border border-slate-200">
+                                                <input
+                                                    type="checkbox"
+                                                    id="check-redundancy"
+                                                    checked={detectedProblems.redundancy}
+                                                    onChange={() => handleStep2Checkbox('redundancy')}
+                                                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600 cursor-pointer"
+                                                />
+                                                <label htmlFor="check-redundancy" className="text-sm text-slate-800 cursor-pointer">
+                                                    <strong>Redundancia de datos:</strong> La razón social <span className="font-mono bg-slate-100 px-1 py-0.5 rounded text-indigo-700">"TecnoDAM Suministros SL"</span> y los datos del cliente se repiten en cada pedido de forma innecesaria.
+                                                </label>
+                                            </div>
+
+                                            <div className="flex items-start gap-3 bg-white p-3.5 rounded-lg border border-slate-200">
+                                                <input
+                                                    type="checkbox"
+                                                    id="check-multiValue"
+                                                    checked={detectedProblems.multiValue}
+                                                    onChange={() => handleStep2Checkbox('multiValue')}
+                                                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600 cursor-pointer"
+                                                />
+                                                <label htmlFor="check-multiValue" className="text-sm text-slate-800 cursor-pointer">
+                                                    <strong>Grupos repetitivos / No atomicidad:</strong> Existen columnas artificiales (<span className="font-mono text-xs">Producto 1</span>, <span className="font-mono text-xs">Producto 2</span>, <span className="font-mono text-xs">Producto 3</span>) que generan valores nulos obligatorios cuando un pedido tiene menos de 3 artículos.
+                                                </label>
+                                            </div>
+
+                                            <div className="flex items-start gap-3 bg-white p-3.5 rounded-lg border border-slate-200">
+                                                <input
+                                                    type="checkbox"
+                                                    id="check-expansion"
+                                                    checked={detectedProblems.expansionDifficulty}
+                                                    onChange={() => handleStep2Checkbox('expansionDifficulty')}
+                                                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600 cursor-pointer"
+                                                />
+                                                <label htmlFor="check-expansion" className="text-sm text-slate-800 cursor-pointer">
+                                                    <strong>Rigidez de escalabilidad (Dificultad de expansión):</strong> Si un cliente compra 4 productos en una misma compra, sería obligatorio alterar el esquema de la base de datos (<span className="font-mono text-xs">ALTER TABLE ADD Producto 4</span>).
+                                                </label>
+                                            </div>
+                                        </div>
+
+                                        {/* Feedback al marcar todas */}
+                                        {allProblemsChecked ? (
+                                            <div className="p-4 bg-emerald-50 border border-emerald-300 rounded-lg flex items-center gap-3 text-emerald-900 text-sm animate-fadeIn">
+                                                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" aria-hidden="true" />
+                                                <span>
+                                                    <strong>¡Excelente análisis técnico!</strong> Has identificado los 3 grandes vicios de un modelo desnormalizado. Estamos listos para aplicar la 1FN.
+                                                </span>
+                                            </div>
+                                        ) : (
+                                            <p className="text-xs text-slate-500 italic">
+                                                (Sugerencia: Revisa la tabla y marca las 3 anomalías presentes para desbloquear el refuerzo pedagógico).
+                                            </p>
+                                        )}
+                                    </div>
+
+                                    {/* Botones de navegación */}
+                                    <div className="pt-4 flex justify-between">
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentStep(1)}
+                                            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        >
+                                            <ArrowLeft className="w-4 h-4" aria-hidden="true" />
+                                            <span>Anterior</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentStep(3)}
+                                            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        >
+                                            <span>Paso 3: Aplicar 1FN</span>
+                                            <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                                        </button>
+                                    </div>
+                                </section>
+                            )}
+
+                            {/* PASO 3: APLICAR 1FN */}
+                            {currentStep === 3 && (
+                                <section aria-labelledby="step3-heading" className="space-y-6">
+                                    <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                                        <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-lg">
+                                            <Layers className="w-6 h-6" aria-hidden="true" />
+                                        </div>
+                                        <div>
+                                            <h2 id="step3-heading" className="text-xl sm:text-2xl font-bold text-slate-900">
+                                                Paso 3: Primera Forma Normal (1FN) — Atomicidad y grupos repetitivos
+                                            </h2>
+                                            <p className="text-sm text-slate-600">Eliminación de columnas repetidas y garantía de valores atómicos en cada celda.</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="p-4 bg-indigo-50 rounded-lg border border-indigo-200 text-sm text-slate-800 space-y-2">
+                                        <h3 className="font-bold text-indigo-950 flex items-center gap-2">
+                                            <ShieldCheck className="w-5 h-5 text-indigo-700" aria-hidden="true" />
+                                            Regla formal de la 1FN
+                                        </h3>
+                                        <p>
+                                            Una tabla está en <strong>Primera Forma Normal (1FN)</strong> si y solo si:
+                                        </p>
+                                        <ol className="list-decimal list-inside space-y-1 ml-2">
+                                            <li>Todos los atributos contienen valores <strong>atómicos</strong> (indivisibles en el contexto del dominio).</li>
+                                            <li>No existen <strong>grupos repetitivos</strong> ni columnas numeradas como <span className="font-mono text-xs">Producto_1, Producto_2...</span></li>
+                                            <li>Existe una <strong>clave primaria (PK)</strong> bien definida para cada registro.</li>
+                                        </ol>
+                                    </div>
+
+                                    {/* Zona de reflexión para el estudiante */}
+                                    <div className="space-y-3 bg-white p-5 rounded-lg border border-slate-200">
+                                        <label htmlFor="student-reflection-1fn" className="block text-sm font-semibold text-slate-900">
+                                            Propuesta del alumno: ¿En qué tablas separarías la tabla original para alcanzar 1FN?
+                                        </label>
+                                        <textarea
+                                            id="student-reflection-1fn"
+                                            rows={3}
+                                            value={studentNotes1FN}
+                                            onChange={(e) => setStudentNotes1FN(e.target.value)}
+                                            placeholder="Escribe aquí tus ideas (ejemplo: Tabla Pedidos con ID_Pedido y Cliente, y Tabla Lineas_Pedido con ID_Pedido y Producto)..."
+                                            className="w-full text-sm p-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-600 focus:border-indigo-600 focus:outline-none placeholder:text-slate-400"
+                                        />
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-xs text-slate-500">Usa este espacio como borrador mental de diseño antes de desplegar la solución.</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowSolution1FN(!showSolution1FN)}
+                                                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold text-xs border border-indigo-200 transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                            >
+                                                <span>{showSolution1FN ? 'Ocultar solución' : 'Ver solución técnica 1FN'}</span>
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Solución 1FN desplegada */}
+                                    {showSolution1FN && (
+                                        <div className="space-y-6 pt-2 border-t border-slate-200 animate-fadeIn">
+                                            <div className="p-3.5 bg-emerald-50 rounded-lg border border-emerald-200 text-emerald-900 text-sm">
+                                                <strong>Transformación 1FN aplicada:</strong> Descomponemos en dos tablas: <strong>Pedidos_1FN</strong> (cabecera con datos del pedido y cliente) y <strong>Detalle_Pedido_1FN</strong> (una fila individual por cada producto pedido, con clave compuesta <span className="font-mono text-xs font-bold">[num_pedido + producto]</span>).
+                                            </div>
+
+                                            {/* Tabla 1: Pedidos_1FN */}
+                                            <div className="space-y-2">
+                                                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wide">
+                                                    Tabla A: <span className="font-mono text-indigo-700">Pedidos_1FN</span> (Cabecera)
+                                                </h4>
+                                                <div className="overflow-x-auto border border-slate-300 rounded-lg">
+                                                    <table className="w-full text-left text-xs sm:text-sm bg-white">
+                                                        <caption className="sr-only">Tabla de pedidos resultante tras 1FN</caption>
+                                                        <thead className="bg-slate-100 text-slate-800 font-semibold border-b border-slate-300">
+                                                            <tr>
+                                                                <th scope="col" className="p-2.5 border-r border-slate-200 font-mono">num_pedido (PK)</th>
+                                                                <th scope="col" className="p-2.5 border-r border-slate-200">cliente</th>
+                                                                <th scope="col" className="p-2.5 border-r border-slate-200">email_cliente</th>
+                                                                <th scope="col" className="p-2.5">nombre_comercial</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody className="divide-y divide-slate-200">
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-01</th>
+                                                                <td className="p-2.5 border-r border-slate-200">Marta Soler</td>
+                                                                <td className="p-2.5 border-r border-slate-200 text-slate-600">msoler@dam-fp.es</td>
+                                                                <td className="p-2.5">TecnoDAM Suministros SL</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-02</th>
+                                                                <td className="p-2.5 border-r border-slate-200">Carlos Benítez</td>
+                                                                <td className="p-2.5 border-r border-slate-200 text-slate-600">cbenitez@redes-fp.es</td>
+                                                                <td className="p-2.5">TecnoDAM Suministros SL</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-03</th>
+                                                                <td className="p-2.5 border-r border-slate-200">Marta Soler</td>
+                                                                <td className="p-2.5 border-r border-slate-200 text-slate-600">msoler@dam-fp.es</td>
+                                                                <td className="p-2.5">TecnoDAM Suministros SL</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-04</th>
+                                                                <td className="p-2.5 border-r border-slate-200">Daniel Ramos</td>
+                                                                <td className="p-2.5 border-r border-slate-200 text-slate-600">dramos@tech-fp.com</td>
+                                                                <td className="p-2.5">TecnoDAM Suministros SL</td>
+                                                            </tr>
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+
+                                            {/* Tabla 2: Detalle_Pedido_1FN */}
+                                            <div className="space-y-2">
+                                                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wide">
+                                                    Tabla B: <span className="font-mono text-indigo-700">Detalle_Pedido_1FN</span> (Filas atómicas)
+                                                </h4>
+                                                <div className="overflow-x-auto border border-slate-300 rounded-lg">
+                                                    <table className="w-full text-left text-xs sm:text-sm bg-white">
+                                                        <caption className="sr-only">Tabla de detalle de pedido con una fila por cada producto adquirido</caption>
+                                                        <thead className="bg-slate-100 text-slate-800 font-semibold border-b border-slate-300">
+                                                            <tr>
+                                                                <th scope="col" className="p-2.5 border-r border-slate-200 font-mono">num_pedido (PK, FK)</th>
+                                                                <th scope="col" className="p-2.5 border-r border-slate-200 font-mono">producto (PK)</th>
+                                                                <th scope="col" className="p-2.5 border-r border-slate-200">precio_unitario</th>
+                                                                <th scope="col" className="p-2.5">cantidad</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody className="divide-y divide-slate-200 text-slate-700">
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-01</th>
+                                                                <td className="p-2.5 border-r border-slate-200 font-medium">Teclado mecánico RGB</td>
+                                                                <td className="p-2.5 border-r border-slate-200">75.00 €</td>
+                                                                <td className="p-2.5">1</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-01</th>
+                                                                <td className="p-2.5 border-r border-slate-200 font-medium">Ratón óptico 3200DPI</td>
+                                                                <td className="p-2.5 border-r border-slate-200">25.00 €</td>
+                                                                <td className="p-2.5">1</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-02</th>
+                                                                <td className="p-2.5 border-r border-slate-200 font-medium">Monitor IPS 27"</td>
+                                                                <td className="p-2.5 border-r border-slate-200">199.99 €</td>
+                                                                <td className="p-2.5">2</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-03</th>
+                                                                <td className="p-2.5 border-r border-slate-200 font-medium">Auriculares Studio Pro</td>
+                                                                <td className="p-2.5 border-r border-slate-200">89.50 €</td>
+                                                                <td className="p-2.5">1</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-03</th>
+                                                                <td className="p-2.5 border-r border-slate-200 font-medium">Webcam 1080p FHD</td>
+                                                                <td className="p-2.5 border-r border-slate-200">45.00 €</td>
+                                                                <td className="p-2.5">1</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-03</th>
+                                                                <td className="p-2.5 border-r border-slate-200 font-medium">Soporte Monitor Brazo</td>
+                                                                <td className="p-2.5 border-r border-slate-200">32.00 €</td>
+                                                                <td className="p-2.5">1</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-04</th>
+                                                                <td className="p-2.5 border-r border-slate-200 font-medium">Memoria RAM 32GB DDR5</td>
+                                                                <td className="p-2.5 border-r border-slate-200">115.00 €</td>
+                                                                <td className="p-2.5">4</td>
+                                                            </tr>
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Botones de navegación */}
+                                    <div className="pt-4 flex justify-between">
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentStep(2)}
+                                            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        >
+                                            <ArrowLeft className="w-4 h-4" aria-hidden="true" />
+                                            <span>Anterior</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentStep(4)}
+                                            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        >
+                                            <span>Paso 4: Aplicar 2FN</span>
+                                            <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                                        </button>
+                                    </div>
+                                </section>
+                            )}
+
+                            {/* PASO 4: APLICAR 2FN */}
+                            {currentStep === 4 && (
+                                <section aria-labelledby="step4-heading" className="space-y-6">
+                                    <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                                        <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-lg">
+                                            <ShieldCheck className="w-6 h-6" aria-hidden="true" />
+                                        </div>
+                                        <div>
+                                            <h2 id="step4-heading" className="text-xl sm:text-2xl font-bold text-slate-900">
+                                                Paso 4: Segunda Forma Normal (2FN) — Dependencias funcionales completas
+                                            </h2>
+                                            <p className="text-sm text-slate-600">Eliminación de dependencias parciales en tablas con claves primarias compuestas.</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="p-4 bg-indigo-50 rounded-lg border border-indigo-200 text-sm text-slate-800 space-y-2">
+                                        <h3 className="font-bold text-indigo-950 flex items-center gap-2">
+                                            <Layers className="w-5 h-5 text-indigo-700" aria-hidden="true" />
+                                            Regla formal de la 2FN
+                                        </h3>
+                                        <p>
+                                            Una tabla está en <strong>Segunda Forma Normal (2FN)</strong> si y solo si:
+                                        </p>
+                                        <ol className="list-decimal list-inside space-y-1 ml-2">
+                                            <li>Cumple con los requisitos de la <strong>1FN</strong>.</li>
+                                            <li>Todos los atributos no clave tienen <strong>dependencia funcional completa</strong> de la clave primaria. Es decir, ningún atributo secundario depende únicamente de una parte de la clave compuesta.</li>
+                                        </ol>
+                                    </div>
+
+                                    {/* Caso concreto y reflexión sobre Nombre Comercial */}
+                                    <div className="border border-slate-200 rounded-lg p-5 bg-slate-50/70 space-y-3">
+                                        <h3 className="font-semibold text-slate-900 text-base">
+                                            Análisis en nuestro caso práctico:
+                                        </h3>
+                                        <p className="text-sm text-slate-700 leading-relaxed">
+                                            En la tabla <span className="font-mono font-semibold text-indigo-700">Detalle_Pedido_1FN</span>, la clave primaria es compuesta: <span className="font-mono text-xs font-bold">[num_pedido, producto]</span>.
+                                            Atributos como <span className="font-mono text-xs">precio_unitario</span> y <span className="font-mono text-xs">cantidad</span> dependen de ambos campos simultáneamente (el precio se aplica a ese producto en ese momento/pedido y la cantidad a esa línea).
+                                        </p>
+                                        <div className="p-3 bg-white rounded border border-slate-200 text-xs text-slate-600">
+                                            <span className="font-bold text-slate-800">Nota de reflexión sobre 'Nombre Comercial':</span> En la tabla de cabecera <span className="font-mono text-xs">Pedidos</span>, el atributo <span className="font-mono text-xs">nombre_comercial</span> representa a la única empresa vendedora (<span className="italic">TecnoDAM Suministros SL</span>). Al ser constante para todo el sistema, en un caso mono-empresa se asume como metadato del sistema o constante de configuración. No obstante, si el sistema gestionara compras a <em>múltiples proveedores distintos</em>, este atributo causaría una clara dependencia que obligaría a crear una tabla independiente de Proveedores.
+                                        </div>
+                                    </div>
+
+                                    {/* Ejercicio de opción múltiple interactivo */}
+                                    <div className="border border-indigo-200 bg-white rounded-xl p-5 space-y-4 shadow-2xs">
+                                        <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                                            <HelpCircle className="w-5 h-5 text-indigo-600" aria-hidden="true" />
+                                            Pregunta interactiva sobre 2FN
+                                        </h3>
+                                        <p className="text-sm text-slate-700">
+                                            Imagina que ampliamos la tabla <strong>Detalle_Pedido</strong> con el campo <span className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded text-indigo-700">telefono_proveedor</span> que suministra cada producto. Sabiendo que la clave es <span className="font-mono text-xs font-bold">[num_pedido, producto]</span>, ¿qué problema surge respecto a la 2FN?
+                                        </p>
+
+                                        <div className="space-y-2.5">
+                                            {[
+                                                { id: 'optA', text: 'No hay problema, porque el teléfono ayuda a contactar con el proveedor para ese pedido concreto.' },
+                                                { id: 'optB', text: 'Existe una dependencia parcial: el teléfono_proveedor depende solo del producto/proveedor, no del num_pedido; violando la 2FN.', isCorrect: true },
+                                                { id: 'optC', text: 'Se viola la 1FN porque el teléfono tiene números y caracteres especiales no atómicos.' }
+                                            ].map((opt) => (
+                                                <div 
+                                                    key={opt.id}
+                                                    onClick={() => {
+                                                        setSelected2FNOption(opt.id);
+                                                        setSubmitted2FN(true);
+                                                    }}
+                                                    className={`p-3.5 rounded-lg border text-sm cursor-pointer transition-all flex items-start gap-3 ${
+                                                        selected2FNOption === opt.id
+                                                            ? 'border-indigo-600 bg-indigo-50/50 ring-1 ring-indigo-600'
+                                                            : 'border-slate-200 hover:bg-slate-50'
+                                                    }`}
+                                                >
+                                                    <input
+                                                        type="radio"
+                                                        id={`radio-2fn-${opt.id}`}
+                                                        name="2fn-question"
+                                                        checked={selected2FNOption === opt.id}
+                                                        onChange={() => {
+                                                            setSelected2FNOption(opt.id);
+                                                            setSubmitted2FN(true);
+                                                        }}
+                                                        className="mt-0.5 text-indigo-600 focus:ring-indigo-600"
+                                                    />
+                                                    <label htmlFor={`radio-2fn-${opt.id}`} className="text-slate-800 cursor-pointer">
+                                                        {opt.text}
+                                                    </label>
+                                                </div>
+                                            ))}
+                                        </div>
+
+                                        {submitted2FN && (
+                                            <div className={`p-4 rounded-lg text-sm border flex items-start gap-3 animate-fadeIn ${
+                                                selected2FNOption === 'optB' 
+                                                    ? 'bg-emerald-50 border-emerald-300 text-emerald-900' 
+                                                    : 'bg-rose-50 border-rose-300 text-rose-900'
+                                            }`}>
+                                                {selected2FNOption === 'optB' ? (
+                                                    <>
+                                                        <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                        <div>
+                                                            <strong className="block font-bold">¡Respuesta correcta!</strong>
+                                                            En una clave compuesta [num_pedido, producto], el teléfono del proveedor solo depende del producto (parte de la clave), constituyendo una dependencia parcial que obligaría a crear una tabla independiente de Proveedores / Productos para cumplir 2FN.
+                                                        </div>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <XCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                        <div>
+                                                            <strong className="block font-bold">Respuesta incorrecta</strong>
+                                                            Revisa la regla: como el proveedor depende únicamente del producto y no del pedido específico, es una dependencia parcial de la clave primaria compuesta, lo cual vulnera la 2FN.
+                                                        </div>
+                                                    </>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Botones de navegación */}
+                                    <div className="pt-4 flex justify-between">
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentStep(3)}
+                                            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        >
+                                            <ArrowLeft className="w-4 h-4" aria-hidden="true" />
+                                            <span>Anterior</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentStep(5)}
+                                            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        >
+                                            <span>Paso 5: Aplicar 3FN</span>
+                                            <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                                        </button>
+                                    </div>
+                                </section>
+                            )}
+
+                            {/* PASO 5: APLICAR 3FN */}
+                            {currentStep === 5 && (
+                                <section aria-labelledby="step5-heading" className="space-y-6">
+                                    <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                                        <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-lg">
+                                            <Sparkles className="w-6 h-6" aria-hidden="true" />
+                                        </div>
+                                        <div>
+                                            <h2 id="step5-heading" className="text-xl sm:text-2xl font-bold text-slate-900">
+                                                Paso 5: Tercera Forma Normal (3FN) — Eliminación de dependencias transitivas
+                                            </h2>
+                                            <p className="text-sm text-slate-600">Ningún atributo no clave debe depender de otro atributo no clave.</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="p-4 bg-indigo-50 rounded-lg border border-indigo-200 text-sm text-slate-800 space-y-2">
+                                        <h3 className="font-bold text-indigo-950 flex items-center gap-2">
+                                            <ShieldCheck className="w-5 h-5 text-indigo-700" aria-hidden="true" />
+                                            Regla formal de la 3FN
+                                        </h3>
+                                        <p>
+                                            Una tabla está en <strong>Tercera Forma Normal (3FN)</strong> si y solo si:
+                                        </p>
+                                        <ol className="list-decimal list-inside space-y-1 ml-2">
+                                            <li>Cumple con la <strong>2FN</strong>.</li>
+                                            <li><strong>No contiene dependencias transitivas:</strong> Si A → B y B → C, entonces C no debe estar en la misma tabla si B no es clave candidata. Todo atributo no clave debe depender <em>directa y únicamente</em> de la clave primaria ("la clave, toda la clave y nada más que la clave").</li>
+                                        </ol>
+                                    </div>
+
+                                    {/* Detección de la dependencia transitiva */}
+                                    <div className="bg-amber-50/70 border-l-4 border-amber-500 p-4 rounded-r-lg space-y-2">
+                                        <h3 className="font-semibold text-amber-950 text-sm flex items-center gap-2">
+                                            <AlertCircle className="w-4 h-4 text-amber-600" aria-hidden="true" />
+                                            Dependencia transitiva detectada en Pedidos:
+                                        </h3>
+                                        <p className="text-xs sm:text-sm text-slate-800">
+                                            En la tabla <span className="font-mono text-xs font-semibold">Pedidos (num_pedido, cliente, email_cliente)</span>:
+                                            <br />
+                                            <span className="font-mono text-xs bg-white px-2 py-1 rounded border border-amber-200 inline-block mt-1">
+                                                num_pedido ➔ cliente &nbsp;|&nbsp; cliente ➔ email_cliente
+                                            </span>
+                                            <br />
+                                            El atributo <span className="font-mono text-xs">email_cliente</span> depende del cliente, NO del pedido en sí. Si un cliente cambia de correo electrónico, tendríamos que actualizarlo en múltiples filas de pedidos (anomalía de actualización).
+                                        </p>
+                                    </div>
+
+                                    {/* Esquema Final Normalizado 3FN */}
+                                    <div className="space-y-4 pt-2">
+                                        <div className="flex items-center justify-between">
+                                            <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                                                <Database className="w-5 h-5 text-indigo-600" aria-hidden="true" />
+                                                Esquema relacional final normalizado en 3FN (3 Tablas)
+                                            </h3>
+                                            <span className="px-2.5 py-1 text-xs font-semibold bg-emerald-100 text-emerald-800 rounded-full">
+                                                Normalización Completa
+                                            </span>
+                                        </div>
+
+                                        {/* TABLA 1: Clientes */}
+                                        <div className="border border-slate-300 rounded-lg overflow-hidden bg-white shadow-2xs">
+                                            <div className="bg-slate-100 px-4 py-2 border-b border-slate-200 font-mono text-xs font-bold text-slate-800 flex justify-between">
+                                                <span>1. Tabla: Clientes</span>
+                                                <span className="text-slate-500 font-normal">PK: id_cliente</span>
+                                            </div>
+                                            <table className="w-full text-left text-xs sm:text-sm border-collapse">
+                                                <caption className="sr-only">Tabla de clientes normalizada en 3FN</caption>
+                                                <thead className="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200">
+                                                    <tr>
+                                                        <th scope="col" className="p-2.5 border-r border-slate-200 font-mono">id_cliente (PK)</th>
+                                                        <th scope="col" className="p-2.5 border-r border-slate-200">nombre</th>
+                                                        <th scope="col" className="p-2.5">email</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-200">
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">CLI-01</th>
+                                                        <td className="p-2.5 border-r border-slate-200 font-medium">Marta Soler</td>
+                                                        <td className="p-2.5 text-slate-600">msoler@dam-fp.es</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">CLI-02</th>
+                                                        <td className="p-2.5 border-r border-slate-200 font-medium">Carlos Benítez</td>
+                                                        <td className="p-2.5 text-slate-600">cbenitez@redes-fp.es</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">CLI-03</th>
+                                                        <td className="p-2.5 border-r border-slate-200 font-medium">Daniel Ramos</td>
+                                                        <td className="p-2.5 text-slate-600">dramos@tech-fp.com</td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+
+                                        {/* TABLA 2: Pedidos */}
+                                        <div className="border border-slate-300 rounded-lg overflow-hidden bg-white shadow-2xs">
+                                            <div className="bg-slate-100 px-4 py-2 border-b border-slate-200 font-mono text-xs font-bold text-slate-800 flex justify-between">
+                                                <span>2. Tabla: Pedidos</span>
+                                                <span className="text-slate-500 font-normal">PK: num_pedido · FK: id_cliente</span>
+                                            </div>
+                                            <table className="w-full text-left text-xs sm:text-sm border-collapse">
+                                                <caption className="sr-only">Tabla de pedidos vinculada a clientes por clave foránea</caption>
+                                                <thead className="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200">
+                                                    <tr>
+                                                        <th scope="col" className="p-2.5 border-r border-slate-200 font-mono">num_pedido (PK)</th>
+                                                        <th scope="col" className="p-2.5 border-r border-slate-200 font-mono">id_cliente (FK)</th>
+                                                        <th scope="col" className="p-2.5">fecha_pedido</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-200">
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-01</th>
+                                                        <td className="p-2.5 font-mono border-r border-slate-200 text-indigo-700 font-medium">CLI-01</td>
+                                                        <td className="p-2.5 text-slate-600">2024-10-12</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-02</th>
+                                                        <td className="p-2.5 font-mono border-r border-slate-200 text-indigo-700 font-medium">CLI-02</td>
+                                                        <td className="p-2.5 text-slate-600">2024-10-14</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-03</th>
+                                                        <td className="p-2.5 font-mono border-r border-slate-200 text-indigo-700 font-medium">CLI-01</td>
+                                                        <td className="p-2.5 text-slate-600">2024-10-15</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-04</th>
+                                                        <td className="p-2.5 font-mono border-r border-slate-200 text-indigo-700 font-medium">CLI-03</td>
+                                                        <td className="p-2.5 text-slate-600">2024-10-16</td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+
+                                        {/* TABLA 3: Detalle_Pedido */}
+                                        <div className="border border-slate-300 rounded-lg overflow-hidden bg-white shadow-2xs">
+                                            <div className="bg-slate-100 px-4 py-2 border-b border-slate-200 font-mono text-xs font-bold text-slate-800 flex justify-between">
+                                                <span>3. Tabla: Detalle_Pedido</span>
+                                                <span className="text-slate-500 font-normal">PK Compuesta: [num_pedido, producto]</span>
+                                            </div>
+                                            <table className="w-full text-left text-xs sm:text-sm border-collapse">
+                                                <caption className="sr-only">Tabla de líneas de pedido con productos, precios y cantidades</caption>
+                                                <thead className="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200">
+                                                    <tr>
+                                                        <th scope="col" className="p-2.5 border-r border-slate-200 font-mono">num_pedido (PK, FK)</th>
+                                                        <th scope="col" className="p-2.5 border-r border-slate-200 font-mono">producto (PK)</th>
+                                                        <th scope="col" className="p-2.5 border-r border-slate-200">precio_unitario</th>
+                                                        <th scope="col" className="p-2.5">cantidad</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-200">
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-01</th>
+                                                        <td className="p-2.5 border-r border-slate-200">Teclado mecánico RGB</td>
+                                                        <td className="p-2.5 border-r border-slate-200">75.00 €</td>
+                                                        <td className="p-2.5">1</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-01</th>
+                                                        <td className="p-2.5 border-r border-slate-200">Ratón óptico 3200DPI</td>
+                                                        <td className="p-2.5 border-r border-slate-200">25.00 €</td>
+                                                        <td className="p-2.5">1</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-02</th>
+                                                        <td className="p-2.5 border-r border-slate-200">Monitor IPS 27"</td>
+                                                        <td className="p-2.5 border-r border-slate-200">199.99 €</td>
+                                                        <td className="p-2.5">2</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-03</th>
+                                                        <td className="p-2.5 border-r border-slate-200">Auriculares Studio Pro</td>
+                                                        <td className="p-2.5 border-r border-slate-200">89.50 €</td>
+                                                        <td className="p-2.5">1</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-03</th>
+                                                        <td className="p-2.5 border-r border-slate-200">Webcam 1080p FHD</td>
+                                                        <td className="p-2.5 border-r border-slate-200">45.00 €</td>
+                                                        <td className="p-2.5">1</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-03</th>
+                                                        <td className="p-2.5 border-r border-slate-200">Soporte Monitor Brazo</td>
+                                                        <td className="p-2.5 border-r border-slate-200">32.00 €</td>
+                                                        <td className="p-2.5">1</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <th scope="row" className="p-2.5 font-mono font-medium text-slate-900 border-r border-slate-200">PED-2024-04</th>
+                                                        <td className="p-2.5 border-r border-slate-200">Memoria RAM 32GB DDR5</td>
+                                                        <td className="p-2.5 border-r border-slate-200">115.00 €</td>
+                                                        <td className="p-2.5">4</td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+
+                                    {/* Botones de navegación */}
+                                    <div className="pt-4 flex justify-between">
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentStep(4)}
+                                            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        >
+                                            <ArrowLeft className="w-4 h-4" aria-hidden="true" />
+                                            <span>Anterior</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentStep(6)}
+                                            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        >
+                                            <span>Paso 6: Autoevaluación Final</span>
+                                            <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                                        </button>
+                                    </div>
+                                </section>
+                            )}
+
+                            {/* PASO 6: AUTOEVALUACIÓN FINAL */}
+                            {currentStep === 6 && (
+                                <section aria-labelledby="step6-heading" className="space-y-8">
+                                    <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                                        <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-lg">
+                                            <CheckSquare className="w-6 h-6" aria-hidden="true" />
+                                        </div>
+                                        <div>
+                                            <h2 id="step6-heading" className="text-xl sm:text-2xl font-bold text-slate-900">
+                                                Paso 6: Cuestionario de Autoevaluación Final (5 preguntas)
+                                            </h2>
+                                            <p className="text-sm text-slate-600">Comprueba tu dominio de las tres formas normales aplicadas en este laboratorio de DAM.</p>
+                                        </div>
+                                    </div>
+
+                                    <form onSubmit={handleQuizSubmit} className="space-y-6">
+                                        
+                                        {/* PREGUNTA 1 */}
+                                        <fieldset className="p-5 border border-slate-200 rounded-xl bg-white space-y-3">
+                                            <legend className="px-2 font-bold text-slate-900 text-sm sm:text-base">
+                                                1. ¿Cuál es el requisito indispensable para que una relación esté en 1FN?
+                                            </legend>
+                                            <div className="space-y-2 text-sm">
+                                                {[
+                                                    { key: 'a', text: 'Que no existan claves foráneas nulas en las tablas hijas.' },
+                                                    { key: 'b', text: 'Que todos los atributos contengan valores atómicos y no existan columnas repetitivas.', isCorrect: true },
+                                                    { key: 'c', text: 'Que todas las tablas tengan al menos dos claves candidatas.' }
+                                                ].map((opt) => (
+                                                    <div key={opt.key} className="flex items-start gap-3 p-2.5 rounded-lg hover:bg-slate-50 transition-colors">
+                                                        <input
+                                                            type="radio"
+                                                            id={`q1-${opt.key}`}
+                                                            name="q1"
+                                                            value={opt.key}
+                                                            checked={quizAnswers.q1 === opt.key}
+                                                            onChange={() => handleQuizOptionChange('q1', opt.key)}
+                                                            disabled={quizSubmitted}
+                                                            className="mt-0.5 text-indigo-600 focus:ring-indigo-600"
+                                                        />
+                                                        <label htmlFor={`q1-${opt.key}`} className="text-slate-800 cursor-pointer flex-1">
+                                                            <strong>{opt.key})</strong> {opt.text}
+                                                        </label>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {quizSubmitted && (
+                                                <div className={`p-3 rounded-lg text-xs sm:text-sm flex items-start gap-2 ${
+                                                    quizAnswers.q1 === 'b' ? 'bg-emerald-50 text-emerald-900 border border-emerald-200' : 'bg-rose-50 text-rose-900 border border-rose-200'
+                                                }`}>
+                                                    {quizAnswers.q1 === 'b' ? (
+                                                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                    ) : (
+                                                        <XCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                    )}
+                                                    <div>
+                                                        <strong>{quizAnswers.q1 === 'b' ? 'Correcto: ' : 'Incorrecto (Respuesta correcta: b): '}</strong>
+                                                        La 1FN exige atomicidad en las celdas y la supresión de repetición de columnas como Producto 1, Producto 2...
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </fieldset>
+
+                                        {/* PREGUNTA 2 */}
+                                        <fieldset className="p-5 border border-slate-200 rounded-xl bg-white space-y-3">
+                                            <legend className="px-2 font-bold text-slate-900 text-sm sm:text-base">
+                                                2. ¿Qué anomalía específica soluciona la 2ª Forma Normal (2FN)?
+                                            </legend>
+                                            <div className="space-y-2 text-sm">
+                                                {[
+                                                    { key: 'a', text: 'La presencia de valores nulos obligatorios en claves primarias.' },
+                                                    { key: 'b', text: 'Las dependencias transitivas entre atributos secundarios.' },
+                                                    { key: 'c', text: 'Las dependencias funcionales parciales respecto a claves primarias compuestas.', isCorrect: true }
+                                                ].map((opt) => (
+                                                    <div key={opt.key} className="flex items-start gap-3 p-2.5 rounded-lg hover:bg-slate-50 transition-colors">
+                                                        <input
+                                                            type="radio"
+                                                            id={`q2-${opt.key}`}
+                                                            name="q2"
+                                                            value={opt.key}
+                                                            checked={quizAnswers.q2 === opt.key}
+                                                            onChange={() => handleQuizOptionChange('q2', opt.key)}
+                                                            disabled={quizSubmitted}
+                                                            className="mt-0.5 text-indigo-600 focus:ring-indigo-600"
+                                                        />
+                                                        <label htmlFor={`q2-${opt.key}`} className="text-slate-800 cursor-pointer flex-1">
+                                                            <strong>{opt.key})</strong> {opt.text}
+                                                        </label>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {quizSubmitted && (
+                                                <div className={`p-3 rounded-lg text-xs sm:text-sm flex items-start gap-2 ${
+                                                    quizAnswers.q2 === 'c' ? 'bg-emerald-50 text-emerald-900 border border-emerald-200' : 'bg-rose-50 text-rose-900 border border-rose-200'
+                                                }`}>
+                                                    {quizAnswers.q2 === 'c' ? (
+                                                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                    ) : (
+                                                        <XCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                    )}
+                                                    <div>
+                                                        <strong>{quizAnswers.q2 === 'c' ? 'Correcto: ' : 'Incorrecto (Respuesta correcta: c): '}</strong>
+                                                        La 2FN asegura que ningún atributo no clave dependa únicamente de un subconjunto de una clave compuesta.
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </fieldset>
+
+                                        {/* PREGUNTA 3 */}
+                                        <fieldset className="p-5 border border-slate-200 rounded-xl bg-white space-y-3">
+                                            <legend className="px-2 font-bold text-slate-900 text-sm sm:text-base">
+                                                3. En nuestro laboratorio, ¿por qué el campo 'email_cliente' en la tabla de Pedidos vulneraba la 3FN?
+                                            </legend>
+                                            <div className="space-y-2 text-sm">
+                                                {[
+                                                    { key: 'a', text: 'Porque depende directamente de "cliente" (atributo no clave) y no del "num_pedido" (dependencia transitiva).', isCorrect: true },
+                                                    { key: 'b', text: 'Porque contiene un símbolo @ que no es un tipo de dato atómico.' },
+                                                    { key: 'c', text: 'Porque impedía que dos clientes compartieran el mismo dominio de correo.' }
+                                                ].map((opt) => (
+                                                    <div key={opt.key} className="flex items-start gap-3 p-2.5 rounded-lg hover:bg-slate-50 transition-colors">
+                                                        <input
+                                                            type="radio"
+                                                            id={`q3-${opt.key}`}
+                                                            name="q3"
+                                                            value={opt.key}
+                                                            checked={quizAnswers.q3 === opt.key}
+                                                            onChange={() => handleQuizOptionChange('q3', opt.key)}
+                                                            disabled={quizSubmitted}
+                                                            className="mt-0.5 text-indigo-600 focus:ring-indigo-600"
+                                                        />
+                                                        <label htmlFor={`q3-${opt.key}`} className="text-slate-800 cursor-pointer flex-1">
+                                                            <strong>{opt.key})</strong> {opt.text}
+                                                        </label>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {quizSubmitted && (
+                                                <div className={`p-3 rounded-lg text-xs sm:text-sm flex items-start gap-2 ${
+                                                    quizAnswers.q3 === 'a' ? 'bg-emerald-50 text-emerald-900 border border-emerald-200' : 'bg-rose-50 text-rose-900 border border-rose-200'
+                                                }`}>
+                                                    {quizAnswers.q3 === 'a' ? (
+                                                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                    ) : (
+                                                        <XCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                    )}
+                                                    <div>
+                                                        <strong>{quizAnswers.q3 === 'a' ? 'Correcto: ' : 'Incorrecto (Respuesta correcta: a): '}</strong>
+                                                        Al cumplirse num_pedido → cliente y cliente → email_cliente, existía transitividad que se subsana creando la entidad Clientes.
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </fieldset>
+
+                                        {/* PREGUNTA 4 */}
+                                        <fieldset className="p-5 border border-slate-200 rounded-xl bg-white space-y-3">
+                                            <legend className="px-2 font-bold text-slate-900 text-sm sm:text-base">
+                                                4. Si dejamos columnas fijas como 'Producto 1', 'Producto 2' y 'Producto 3', ¿cuál es la principal limitación en producción?
+                                            </legend>
+                                            <div className="space-y-2 text-sm">
+                                                {[
+                                                    { key: 'a', text: 'El motor SQL bloqueará automáticamente las consultas JOIN.' },
+                                                    { key: 'b', text: 'Se pierde la posibilidad de asignar un tipo de dato VARCHAR a los nombres de producto.' },
+                                                    { key: 'c', text: 'Rigidez de diseño (se necesitan ALTER TABLE para añadir más productos) y desperdicio de espacio con NULLs.', isCorrect: true }
+                                                ].map((opt) => (
+                                                    <div key={opt.key} className="flex items-start gap-3 p-2.5 rounded-lg hover:bg-slate-50 transition-colors">
+                                                        <input
+                                                            type="radio"
+                                                            id={`q4-${opt.key}`}
+                                                            name="q4"
+                                                            value={opt.key}
+                                                            checked={quizAnswers.q4 === opt.key}
+                                                            onChange={() => handleQuizOptionChange('q4', opt.key)}
+                                                            disabled={quizSubmitted}
+                                                            className="mt-0.5 text-indigo-600 focus:ring-indigo-600"
+                                                        />
+                                                        <label htmlFor={`q4-${opt.key}`} className="text-slate-800 cursor-pointer flex-1">
+                                                            <strong>{opt.key})</strong> {opt.text}
+                                                        </label>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {quizSubmitted && (
+                                                <div className={`p-3 rounded-lg text-xs sm:text-sm flex items-start gap-2 ${
+                                                    quizAnswers.q4 === 'c' ? 'bg-emerald-50 text-emerald-900 border border-emerald-200' : 'bg-rose-50 text-rose-900 border border-rose-200'
+                                                }`}>
+                                                    {quizAnswers.q4 === 'c' ? (
+                                                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                    ) : (
+                                                        <XCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                    )}
+                                                    <div>
+                                                        <strong>{quizAnswers.q4 === 'c' ? 'Correcto: ' : 'Incorrecto (Respuesta correcta: c): '}</strong>
+                                                        Las columnas repetitivas limitan las compras a un número fijo y llenan la base de datos de valores nulos artificiales.
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </fieldset>
+
+                                        {/* PREGUNTA 5 */}
+                                        <fieldset className="p-5 border border-slate-200 rounded-xl bg-white space-y-3">
+                                            <legend className="px-2 font-bold text-slate-900 text-sm sm:text-base">
+                                                5. ¿Cuál es el beneficio primordial de alcanzar 3FN en aplicaciones transaccionales (OLTP)?
+                                            </legend>
+                                            <div className="space-y-2 text-sm">
+                                                {[
+                                                    { key: 'a', text: 'Acelerar al máximo las lecturas masivas sin necesidad de realizar JOINs.' },
+                                                    { key: 'b', text: 'Garantizar la consistencia e integridad evitando anomalías en inserciones, modificaciones y borrados.', isCorrect: true },
+                                                    { key: 'c', text: 'Eliminar completamente el uso de claves foráneas en la base de datos.' }
+                                                ].map((opt) => (
+                                                    <div key={opt.key} className="flex items-start gap-3 p-2.5 rounded-lg hover:bg-slate-50 transition-colors">
+                                                        <input
+                                                            type="radio"
+                                                            id={`q5-${opt.key}`}
+                                                            name="q5"
+                                                            value={opt.key}
+                                                            checked={quizAnswers.q5 === opt.key}
+                                                            onChange={() => handleQuizOptionChange('q5', opt.key)}
+                                                            disabled={quizSubmitted}
+                                                            className="mt-0.5 text-indigo-600 focus:ring-indigo-600"
+                                                        />
+                                                        <label htmlFor={`q5-${opt.key}`} className="text-slate-800 cursor-pointer flex-1">
+                                                            <strong>{opt.key})</strong> {opt.text}
+                                                        </label>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {quizSubmitted && (
+                                                <div className={`p-3 rounded-lg text-xs sm:text-sm flex items-start gap-2 ${
+                                                    quizAnswers.q5 === 'b' ? 'bg-emerald-50 text-emerald-900 border border-emerald-200' : 'bg-rose-50 text-rose-900 border border-rose-200'
+                                                }`}>
+                                                    {quizAnswers.q5 === 'b' ? (
+                                                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                    ) : (
+                                                        <XCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                                    )}
+                                                    <div>
+                                                        <strong>{quizAnswers.q5 === 'b' ? 'Correcto: ' : 'Incorrecto (Respuesta correcta: b): '}</strong>
+                                                        La 3FN reduce al mínimo la redundancia y asegura que cada hecho se almacene en un único lugar lógico.
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </fieldset>
+
+                                        {/* Botones de acción del Quiz */}
+                                        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-slate-200">
+                                            {!quizSubmitted ? (
+                                                <button
+                                                    type="submit"
+                                                    disabled={!quizAnswers.q1 || !quizAnswers.q2 || !quizAnswers.q3 || !quizAnswers.q4 || !quizAnswers.q5}
+                                                    className="w-full sm:w-auto px-6 py-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold text-sm shadow-md transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                                >
+                                                    Corregir autoevaluación (5 preguntas)
+                                                </button>
+                                            ) : (
+                                                <div className="flex flex-col sm:flex-row items-center gap-4 w-full justify-between">
+                                                    <div className="flex items-center gap-3">
+                                                        <span className="text-sm font-semibold text-slate-700">Puntuación obtenida:</span>
+                                                        <span className={`px-3 py-1 rounded-full text-base font-bold ${
+                                                            quizScore >= 4 ? 'bg-emerald-100 text-emerald-800' : quizScore >= 3 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'
+                                                        }`}>
+                                                            {quizScore} / 5 correctas ({Math.round((quizScore / 5) * 100)}%)
+                                                        </span>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={resetQuiz}
+                                                        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                                    >
+                                                        <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                                                        <span>Repetir autoevaluación</span>
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </form>
+
+                                    {/* Mensaje de Cierre / Síntesis Didáctica */}
+                                    <div className="p-6 bg-slate-900 text-white rounded-xl space-y-3 shadow-md">
+                                        <div className="flex items-center gap-2 text-indigo-400">
+                                            <Sparkles className="w-5 h-5" aria-hidden="true" />
+                                            <h3 className="font-bold text-base text-white">
+                                                Laboratorio completado — Resumen para tu evaluación de DAM
+                                            </h3>
+                                        </div>
+                                        <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+                                            Has completado con éxito la normalización técnica de este caso práctico. Recuerda la regla mnemotécnica de Bill Kent para tus futuros desarrollos y exámenes en DAM:
+                                        </p>
+                                        <div className="p-3 bg-slate-800/80 rounded-lg border border-slate-700 font-mono text-xs text-indigo-300 space-y-1">
+                                            <p>• <strong>1FN:</strong> Valores atómicos sin repetición de columnas.</p>
+                                            <p>• <strong>2FN:</strong> Los atributos dependen de <em>toda la clave</em> (no de partes de clave compuesta).</p>
+                                            <p>• <strong>3FN:</strong> Los atributos dependen de <em>nada más que la clave</em> (cero transitividades).</p>
+                                        </div>
+                                    </div>
+
+                                    {/* Botón de retroceso */}
+                                    <div className="pt-2 flex justify-start">
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentStep(5)}
+                                            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2"
+                                        >
+                                            <ArrowLeft className="w-4 h-4" aria-hidden="true" />
+                                            <span>Volver al Paso 5 (Esquema 3FN)</span>
+                                        </button>
+                                    </div>
+                                </section>
+                            )}
+                        </div>
+
+                        {/* SECCIONES FIJAS INFERIORES: CATALOGACIÓN Y ACCESIBILIDAD */}
+                        <div className="mt-12 space-y-8">
+                            
+                            {/* 1. SECCIÓN DE ACCESIBILIDAD */}
+                            <section aria-labelledby="accessibility-heading" className="bg-white border border-slate-200 rounded-xl p-6 shadow-xs">
+                                <div className="flex items-center gap-2.5 mb-4 pb-3 border-b border-slate-100">
+                                    <ShieldCheck className="w-5 h-5 text-emerald-600" aria-hidden="true" />
+                                    <h2 id="accessibility-heading" className="text-lg font-bold text-slate-900">
+                                        Comprobaciones de accesibilidad aplicadas (Directrices Módulo 2)
+                                    </h2>
+                                </div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="flex items-start gap-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200">
+                                        <Check className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                        <div className="text-xs sm:text-sm text-slate-700">
+                                            <strong className="text-slate-900 block mb-0.5">1. Contraste de color suficiente (Nivel AA)</strong>
+                                            Texto oscuro (<span className="font-mono text-xs">slate-800/900</span>) sobre fondos claros, sin emplear grises de bajo contraste para texto principal.
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-start gap-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200">
+                                        <Check className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                        <div className="text-xs sm:text-sm text-slate-700">
+                                            <strong className="text-slate-900 block mb-0.5">2. Estructura navegable y encabezados reales</strong>
+                                            Jerarquía semántica continua (<span className="font-mono text-xs">h1, h2, h3</span>), tablas con <span className="font-mono text-xs">&lt;th scope="col"&gt;</span> y <span className="font-mono text-xs">&lt;caption&gt;</span> descriptivos.
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-start gap-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200">
+                                        <Check className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                        <div className="text-xs sm:text-sm text-slate-700">
+                                            <strong className="text-slate-900 block mb-0.5">3. Controles nativos y foco visible por teclado</strong>
+                                            Elementos <span className="font-mono text-xs">&lt;button&gt;</span>, <span className="font-mono text-xs">&lt;input type="radio/checkbox"&gt;</span> agrupados con <span className="font-mono text-xs">&lt;fieldset&gt;</span>, etiquetas vinculadas <span className="font-mono text-xs">htmlFor</span> y anillo de foco (<span className="font-mono text-xs">focus:ring</span>).
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-start gap-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200">
+                                        <Check className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                                        <div className="text-xs sm:text-sm text-slate-700">
+                                            <strong className="text-slate-900 block mb-0.5">4. Contenido comprensible sin depender de imágenes</strong>
+                                            No se utilizan imágenes que oculten texto informativo; todos los esquemas se estructuran en código HTML accesible con soporte para lectores de pantalla.
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+
+                            {/* 2. FICHA DE CATALOGACIÓN */}
+                            <section aria-labelledby="catalog-heading" className="bg-white border border-slate-200 rounded-xl p-6 shadow-xs">
+                                <div className="flex items-center gap-2.5 mb-4 pb-3 border-b border-slate-100">
+                                    <FileText className="w-5 h-5 text-indigo-600" aria-hidden="true" />
+                                    <h2 id="catalog-heading" className="text-lg font-bold text-slate-900">
+                                        Ficha de catalogación del recurso digital
+                                    </h2>
+                                </div>
+                                <dl className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3.5 text-xs sm:text-sm">
+                                    <div className="border-b border-slate-100 pb-2.5">
+                                        <dt className="font-semibold text-slate-500 uppercase tracking-wider text-[11px]">Título</dt>
+                                        <dd className="font-medium text-slate-900 mt-0.5">Laboratorio guiado: Normalización de bases de datos (1FN, 2FN, 3FN)</dd>
+                                    </div>
+
+                                    <div className="border-b border-slate-100 pb-2.5">
+                                        <dt className="font-semibold text-slate-500 uppercase tracking-wider text-[11px]">Autoría</dt>
+                                        <dd className="font-medium text-slate-900 mt-0.5">Sergio Fructuoso Muñoz — recurso propio para el módulo DAM</dd>
+                                    </div>
+
+                                    <div className="border-b border-slate-100 pb-2.5">
+                                        <dt className="font-semibold text-slate-500 uppercase tracking-wider text-[11px]">Etapa y nivel</dt>
+                                        <dd className="font-medium text-slate-900 mt-0.5">Ciclo Formativo DAM, 2º curso</dd>
+                                    </div>
+
+                                    <div className="border-b border-slate-100 pb-2.5">
+                                        <dt className="font-semibold text-slate-500 uppercase tracking-wider text-[11px]">Materia y saberes</dt>
+                                        <dd className="font-medium text-slate-900 mt-0.5">Bases de datos — diseño y normalización del modelo relacional</dd>
+                                    </div>
+
+                                    <div className="border-b border-slate-100 pb-2.5">
+                                        <dt className="font-semibold text-slate-500 uppercase tracking-wider text-[11px]">Competencias</dt>
+                                        <dd className="font-medium text-slate-900 mt-0.5">Diseño y normalización de bases de datos relacionales</dd>
+                                    </div>
+
+                                    <div className="border-b border-slate-100 pb-2.5">
+                                        <dt className="font-semibold text-slate-500 uppercase tracking-wider text-[11px]">Tipo de recurso</dt>
+                                        <dd className="font-medium text-slate-900 mt-0.5">Secuencia interactiva / guía de laboratorio</dd>
+                                    </div>
+
+                                    <div className="border-b border-slate-100 pb-2.5 md:col-span-2">
+                                        <dt className="font-semibold text-slate-500 uppercase tracking-wider text-[11px]">Licencia</dt>
+                                        <dd className="font-medium text-indigo-700 mt-0.5 flex items-center gap-1.5">
+                                            <a 
+                                                href="https://creativecommons.org/licenses/by/4.0/deed.es" 
+                                                target="_blank" 
+                                                rel="noopener noreferrer"
+                                                className="hover:underline inline-flex items-center gap-1"
+                                            >
+                                                CC BY 4.0 (Reconocimiento) — https://creativecommons.org/licenses/by/4.0/deed.es
+                                                <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+                                            </a>
+                                        </dd>
+                                    </div>
+
+                                    <div className="border-b border-slate-100 pb-2.5 md:col-span-2">
+                                        <dt className="font-semibold text-slate-500 uppercase tracking-wider text-[11px]">Requisitos técnicos</dt>
+                                        <dd className="font-medium text-slate-900 mt-0.5">Navegador web moderno, no requiere cuenta, funciona en móvil y ordenador</dd>
+                                    </div>
+
+                                    <div className="md:col-span-2">
+                                        <dt className="font-semibold text-slate-500 uppercase tracking-wider text-[11px]">Palabras clave</dt>
+                                        <dd className="font-medium text-slate-700 mt-0.5 flex flex-wrap gap-1.5 pt-1">
+                                            {['normalización', 'formas normales', '1FN', '2FN', '3FN', 'base de datos relacional', 'DAM'].map((tag, idx) => (
+                                                <span key={idx} className="bg-slate-100 text-slate-700 text-xs px-2 py-0.5 rounded-md border border-slate-200">
+                                                    #{tag}
+                                                </span>
+                                            ))}
+                                        </dd>
+                                    </div>
+                                </dl>
+                            </section>
+
+                            {/* Footer informativo */}
+                            <footer className="text-center py-6 text-xs text-slate-500 border-t border-slate-200">
+                                <p>Datos de ejemplo de elaboración propia para uso didáctico. Recurso educativo abierto para Formación Profesional.</p>
+                            </footer>
+                        </div>
+                    </main>
+                </div>
+            );
+        }
+
+        createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
